@@ -1,65 +1,59 @@
-export const config = {
-  api: {
-    bodyParser: true,
-  },
-};
+'use strict';
+const https = require('https');
 
-export default async function handler(req, res) {
-  // CORS headers
+module.exports = function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY environment variable is not set' });
-  }
+  if (!apiKey) { res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' }); return; }
 
-  // Parse body — handle both string and object
-  let body;
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  } catch (e) {
-    return res.status(400).json({ error: 'Invalid JSON body', details: e.message });
-  }
+  let rawBody = '';
+  req.on('data', (chunk) => { rawBody += chunk.toString(); });
+  req.on('end', () => {
+    let body;
+    try {
+      body = (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0)
+        ? req.body : JSON.parse(rawBody);
+    } catch (e) {
+      res.status(400).json({ error: 'Invalid JSON', details: e.message });
+      return;
+    }
 
-  if (!body) {
-    return res.status(400).json({ error: 'Empty request body' });
-  }
-
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const payload = JSON.stringify(body);
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(body),
+    };
+
+    const apiReq = https.request(options, (apiRes) => {
+      let data = '';
+      apiRes.on('data', (chunk) => { data += chunk; });
+      apiRes.on('end', () => {
+        try {
+          res.status(apiRes.statusCode).json(JSON.parse(data));
+        } catch (e) {
+          res.status(500).json({ error: 'Bad Anthropic response', raw: data.slice(0, 300) });
+        }
+      });
     });
 
-    const data = await response.json();
+    apiReq.on('error', (e) => {
+      res.status(500).json({ error: 'Network error', details: e.message });
+    });
 
-    if (!response.ok) {
-      console.error('Anthropic API error:', response.status, JSON.stringify(data));
-      return res.status(response.status).json({
-        error: 'Anthropic API error',
-        status: response.status,
-        details: data,
-      });
-    }
-
-    return res.status(200).json(data);
-  } catch (err) {
-    console.error('Proxy error:', err.message, err.stack);
-    return res.status(500).json({ error: 'Proxy error', details: err.message });
-  }
-}
+    apiReq.write(payload);
+    apiReq.end();
+  });
+};
